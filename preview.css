@@ -1,0 +1,5 @@
+/* VS Code Markdown 预览样式：settings.json 里 "markdown.styles": ["E:/Repositories/GDC2md/preview.css"] */
+body {
+  max-width: 900px;   /* 每行文字宽度，按需调整 */
+  margin: 0 auto;     /* 居中 */
+}

@@ -1,0 +1,12 @@
+{
+  "out_dir": "output",
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-flash",
+  "thinking": "disabled",
+  "reasoning_effort": "high",
+  "max_tokens": 16000,
+  "temperature": 1.0,
+  "subtitle_lang": "eng",
+  "video_quality": 1080,
+  "chunk_seconds": 360
+}

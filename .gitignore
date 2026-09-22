@@ -1,0 +1,21 @@
+# 密钥（DPAPI 加密的 DeepSeek API Key）
+secrets.bin
+
+# 生成产物
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
