@@ -3,25 +3,26 @@
 用法：
   python gdc2md.py                       # 交互菜单
   python gdc2md.py <vault_url> [--from clean]   # 直接处理
+  python gdc2md.py html                  # 为已有项目重新生成根目录的 HTML 文档
 """
 import argparse
 import sys
 from getpass import getpass
 
-from gdc2md import config, pipeline, serve
+from gdc2md import config, pipeline
 from gdc2md.llm import DeepSeek
 
 
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    ap = argparse.ArgumentParser(description="GDC Vault 视频 → 字幕 → Markdown 文档")
-    ap.add_argument("url", nargs="?", help="GDC Vault 播放页 URL；或 serve = 常驻托管输出目录的本地 HTTP 服务")
+    ap = argparse.ArgumentParser(description="GDC Vault 视频 → 字幕 → Markdown / HTML 文档")
+    ap.add_argument("url", nargs="?", help="GDC Vault 播放页 URL；或 html = 用各项目最近一次 run 重新生成根目录的 HTML 文档")
     ap.add_argument("--from", dest="start", default="resolve", choices=pipeline.STAGES, help="（调试用）从指定阶段续跑，默认从头自动执行全部阶段")
     args = ap.parse_args()
 
     cfg = config.load_config()
-    if args.url == "serve":
-        serve.serve_forever(config.out_dir(cfg), serve.port_of(cfg["http_base"]))
+    if args.url == "html":
+        pipeline.render_all_html(cfg)
         return
     if args.url:
         process(args.url, cfg, args.start)
@@ -34,7 +35,7 @@ def menu(cfg: dict) -> None:
                "2": lambda: manage_key(cfg),
                "3": lambda: settings(cfg)}
     while True:
-        print(f"\n==== GDC2md ====   {serve_status(cfg)}\n 1) 处理 GDC Vault 视频\n 2) 管理 DeepSeek API Key\n 3) 设置\n 0) 退出")
+        print("\n==== GDC2md ====\n 1) 处理 GDC Vault 视频\n 2) 管理 DeepSeek API Key\n 3) 设置\n 0) 退出")
         choice = input("> ").strip()
         if choice == "0":
             return
@@ -45,22 +46,6 @@ def menu(cfg: dict) -> None:
             action()
         except (RuntimeError, ValueError, OSError) as e:
             print(f"错误：{e}")
-
-
-_server = None
-
-
-def serve_status(cfg: dict) -> str:
-    """控制台运行期间托管输出目录，文档里的 http 链接才可点；端口被占则提示。"""
-    global _server
-    if cfg["link_style"] != "http":
-        return ""
-    port = serve.port_of(cfg["http_base"])
-    if _server is None or _server.server_address[1] != port:
-        if _server:
-            serve.stop(_server)
-        _server = serve.start_background(config.out_dir(cfg), port)
-    return f"[本地服务 {cfg['http_base']} 运行中]" if _server else f"[端口 {port} 被占用，文档链接可能由另一实例提供]"
 
 
 def process(url: str, cfg: dict, start: str) -> None:

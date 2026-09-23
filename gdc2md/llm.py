@@ -1,6 +1,7 @@
-"""阶段 3：DeepSeek 清洗英文字幕、分小节、拆段落块、翻译为中文，再归组为大章节并生成概述。"""
+"""阶段 3~4：DeepSeek 清洗英文字幕、分小节、拆段落块、翻译为中文，再归组为大章节并生成概述；长小节再拆带标题的小段。"""
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
@@ -16,7 +17,8 @@ Log = Callable[[str], None]
 
 @dataclass
 class Section:
-    """小节：连续的一段 cue，内容拆成若干段落块（blocks: [{"en","zh"}]）。"""
+    """小节：连续的一段 cue，内容拆成若干段落块（blocks: [{"en","zh"}]）；
+    长小节再把相邻块归为带标题的小段（groups: [{"title_en","title_zh","first","last"}]，按 blocks 下标）。"""
     title_en: str
     title_zh: str
     start_idx: int
@@ -24,6 +26,7 @@ class Section:
     start_sec: float
     blocks: list[dict] = field(default_factory=list)
     fallback: bool = False
+    groups: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -169,6 +172,10 @@ SYSTEM_CHAPTERS = """你是游戏开发领域的技术编辑。下面是一场 G
 只输出严格 JSON：{"chapters":[{"title_en":"","title_zh":"","first":起始小节编号,"last":结束小节编号}]}
 硬性约束：各章 [first,last] 按顺序连续、无重叠、无缝隙，合起来恰好覆盖全部小节编号；first/last 为整数。"""
 
+SYSTEM_SUBSECTIONS = """你是游戏开发领域的技术编辑。下面是一场 GDC 演讲中某一小节的正文，已按段落块编号。请把相邻的段落块归组为若干小段，按论点、步骤、案例或话题的变化切分（每组通常 2~6 块、约 400~1000 字），并为每组生成简洁、信息量足的英文标题和中文标题（中文标题不超过 20 字，概括该组的具体内容，不要与小节标题重复）。
+只输出严格 JSON：{"groups":[{"title_en":"","title_zh":"","first":起始块编号,"last":结束块编号}]}
+硬性约束：各组 [first,last] 按顺序连续、无重叠、无缝隙，合起来恰好覆盖全部块编号；first/last 为整数；至少 2 组。"""
+
 SYSTEM_SUMMARY = """你是游戏开发领域的技术编辑与译者。根据一场 GDC 演讲的标题、官方简介、讲者、公司、Track 和章节结构，用中文输出：
 1. title_zh：演讲标题中译（游戏名用官方中文名，如有"Presented by X"译为"由 X 呈现"）。
 2. overview_zh：官方简介中译，面向游戏开发者，术语按业界惯例。
@@ -313,9 +320,10 @@ def group_chapters(client: DeepSeek, sections: list[Section], log: Log) -> list[
     return [Chapter("Full Talk", "全文", 0, len(sections) - 1)]
 
 
-def _validate_chapters(raw, n: int) -> str:
+def _validate_chapters(raw, n: int, name: str = "章") -> str:
+    """校验 [{first,last}] 顺序连续、无重叠、恰好覆盖 [0, n)。"""
     if not isinstance(raw, list) or not raw:
-        return "chapters 为空"
+        return f"{name}列表为空"
     expect = 0
     for c in raw:
         try:
@@ -323,9 +331,83 @@ def _validate_chapters(raw, n: int) -> str:
         except (KeyError, TypeError, ValueError):
             return "first/last 缺失或不是整数"
         if a != expect or b < a:
-            return f"章节 [{a},{b}] 与预期起点 {expect} 不连续"
+            return f"{name} [{a},{b}] 与预期起点 {expect} 不连续"
         expect = b + 1
-    return "" if expect == n else f"最后一章终点 {expect - 1} 未覆盖到 {n - 1}"
+    return "" if expect == n else f"最后一{name}终点 {expect - 1} 未覆盖到 {n - 1}"
+
+
+# ---------- 长小节拆小段 ----------
+
+SUBSECTION_MIN_CHARS = 1000  # 正文（中文，无中文时英文）达到此字数且至少 4 块的小节才拆小段
+
+
+def add_subsections(client: DeepSeek, sections: list[Section], cues: list[Cue], cache_dir: Path, log: Log) -> None:
+    """为长小节生成 groups（就地写入，含 start_sec）；标题按内容哈希缓存，重跑不重复计费。"""
+    long = [s for s in sections if len(s.blocks) >= 4 and sum(len(_body(b)) for b in s.blocks) >= SUBSECTION_MIN_CHARS]
+    log(f"长小节 {len(long)} 个，生成小段标题 ...")
+    for s in long:
+        payload = f"{PROMPT_VERSION}|sub|{s.title_en}|" + "\n".join(_body(b) for b in s.blocks)
+        path = cache_dir / f"sub_{hashlib.sha1(payload.encode('utf-8')).hexdigest()}.json"
+        if path.exists():
+            s.groups = json.loads(path.read_text(encoding="utf-8"))
+        else:
+            groups = _group_blocks(client, s, log)
+            s.groups = groups or []
+            if groups is not None:  # 失败不缓存，下次重试
+                path.write_text(json.dumps(groups, ensure_ascii=False, indent=1), encoding="utf-8")
+        starts = _block_starts(s, cues)
+        for g in s.groups:
+            g["start_sec"] = starts[g["first"]]
+    log(f"小段完成，累计 tokens {client.total_tokens}")
+
+
+def _body(block: dict) -> str:
+    return block.get("zh") or block.get("en", "")
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", text.lower())
+
+
+def _block_starts(s: Section, cues: list[Cue]) -> list[float]:
+    """每个段落块在视频中的起始秒：按英文词数比例估算位置，再在附近找与块开头词重合最多的 cue。
+    清洗后的英文删了口头禅，与原字幕不逐字一致，所以是近似对齐（通常误差在几秒内）。"""
+    seq = [(w, c.idx) for c in cues[s.start_idx:s.end_idx + 1] for w in _words(c.text)]
+    block_words = [_words(b.get("en", "")) for b in s.blocks]
+    total = sum(len(w) for w in block_words) or 1
+    starts, done, last = [], 0, 0
+    for words in block_words:
+        est = max(last, min(len(seq) - 1, done * len(seq) // total)) if seq else 0
+        done += len(words)
+        query, width = set(words[:10]), len(words[:10]) + 2  # 窗口略宽于查询，早一条 cue 起算的窗口会漏词而落败
+        best, best_score = est, 2  # 至少 3 个词重合才采信，否则用比例估算；只向后找，保证单调
+        for p in range(max(last, est - 200), min(len(seq), est + 200)):
+            if p and seq[p][1] == seq[p - 1][1]:
+                continue  # 只在 cue 开头取候选，避免窗口跨进下一条 cue 而选早一条
+            score = len(query & {w for w, _ in seq[p:p + width]})
+            if score > best_score or (score == best_score and score > 2 and abs(p - est) < abs(best - est)):
+                best, best_score = p, score
+        last = best
+        starts.append(cues[seq[best][1]].start if seq else s.start_sec)
+    return starts
+
+
+def _group_blocks(client: DeepSeek, s: Section, log: Log) -> list[dict] | None:
+    """返回小段列表；只分出 1 组时返回 []（不必拆）；两次都不合规返回 None。"""
+    listing = "\n\n".join(f"[{i}] {_body(b)}" for i, b in enumerate(s.blocks))
+    extra = ""
+    for attempt in range(2):
+        data = client.chat_json(SYSTEM_SUBSECTIONS, f"小节标题：{s.title_en} / {s.title_zh}\n块编号范围 [0, {len(s.blocks) - 1}]\n{extra}\n正文：\n{listing}")
+        raw = data.get("groups") if isinstance(data, dict) else None
+        err = _validate_chapters(raw, len(s.blocks), "组")
+        if not err:
+            groups = [{"title_en": str(g.get("title_en", "")).strip(), "title_zh": str(g.get("title_zh", "")).strip(),
+                       "first": int(g["first"]), "last": int(g["last"])} for g in raw]
+            return groups if len(groups) >= 2 else []
+        log(f"    小段结果不合规（{err}），重试 {attempt + 1}/2")
+        extra = f"注意：上一次输出有误——{err}。请严格遵守约束重新输出。"
+    log(f"    「{s.title_en}」拆小段失败，保持整节")
+    return None
 
 
 # ---------- 概述与头部中译 ----------

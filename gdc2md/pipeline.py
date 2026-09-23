@@ -1,10 +1,11 @@
-"""五阶段编排：resolve → fetch → clean → capture → render，每阶段落盘，可从任一阶段续跑。
+"""五阶段编排：resolve → fetch → clean → outline（长小节拆带标题的小段）→ render，每阶段落盘，可从任一阶段续跑。
 
-目录布局（任何一次运行都不覆盖、不删除旧产物）：
+目录布局（runs/ 下的产物不覆盖、不删除）：
   output/<playId>-<slug>/
+    <演讲原标题>.html              阅读版（内嵌视频），每次运行覆盖为最新
     meta.json, raw/, cache/        跨次运行复用
-    runs/<YYYYMMDD-HHMMSS>/        每次运行独立：sections.json, img/, player.html, README.md
---from 续跑时，新 run 目录缺的中间产物（sections.json / img）从最近一次 run 复制过来。
+    runs/<YYYYMMDD-HHMMSS>/        每次运行独立：sections.json, README.md
+--from 续跑时，新 run 目录缺的 sections.json 从最近一次 run 复制过来。
 """
 import json
 import re
@@ -13,9 +14,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from . import capture, config, llm, render, resolve, subtitles
+from . import config, htmldoc, llm, render, resolve, subtitles
 
-STAGES = ["resolve", "fetch", "clean", "capture", "render"]
+STAGES = ["resolve", "fetch", "clean", "outline", "render"]
 Log = Callable[[str], None]
 
 
@@ -33,13 +34,31 @@ def run(vault_url: str, cfg: dict, api_key: str, start_stage: str = "resolve", l
     lang = cfg["subtitle_lang"]
     cues = _stage_fetch(info, out_dir, lang, begin <= 1, log)
     sections, chapters, summary = _stage_clean(info, cues, out_dir, run_dir, prev_run, cfg, api_key, begin <= 2, log)
-    images = _stage_capture(info, sections, run_dir, prev_run, cfg, begin <= 3, log)
+    if begin <= 3:
+        _stage_outline(sections, cues, out_dir, run_dir, cfg, api_key, log)
 
-    log("[5/5] 生成 Markdown 与播放器 ...")
-    render.render_player(info, run_dir)
-    md = render.render_markdown(info, chapters, sections, summary, images, run_dir, f"../../raw/{lang}.vtt", cfg)
-    log(f"完成：{md}")
+    log("[5/5] 生成 Markdown 与 HTML ...")
+    md = render.render_markdown(info, chapters, sections, summary, run_dir, f"../../raw/{lang}.vtt")
+    doc = _render_html(info, chapters, sections, summary, run_dir, cfg)
+    log(f"完成：{md}\n      {doc}")
     return md
+
+
+def render_all_html(cfg: dict, log: Log = print) -> None:
+    """为输出目录下每个项目，用最近一次 run 的产物重新生成根目录的 HTML 文档（不调用 AI、不新建 run）。"""
+    for out_dir in sorted(p for p in config.out_dir(cfg).glob("*") if (p / "meta.json").exists()):
+        run_dir = _latest_run(out_dir)
+        if not run_dir or not (run_dir / "sections.json").exists():
+            log(f"跳过（无 sections.json）：{out_dir.name}")
+            continue
+        info = resolve.VideoInfo.from_dict(_load(out_dir / "meta.json"))
+        sections, chapters, summary = _load_clean(run_dir / "sections.json")
+        log(f"完成：{_render_html(info, chapters, sections, summary, run_dir, cfg)}")
+
+
+def _render_html(info, chapters, sections, summary, run_dir: Path, cfg: dict) -> Path:
+    video = resolve.pick_variant(info, int(cfg["video_quality"]))
+    return htmldoc.render_html(info, chapters, sections, summary, run_dir, f"raw/{cfg['subtitle_lang']}.vtt", video)
 
 
 def _stage_resolve(vault_url: str, out_dir: Path, do: bool, log: Log) -> resolve.VideoInfo:
@@ -70,10 +89,7 @@ def _stage_clean(info, cues, out_dir: Path, run_dir: Path, prev_run: Path | None
     sections_path = run_dir / "sections.json"
     if not do:
         _copy_from_prev(prev_run, "sections.json", run_dir)
-        data = _load(sections_path)
-        sections = [llm.Section.from_dict(s) for s in data["sections"]]
-        chapters = [llm.Chapter(**c) for c in data.get("chapters", [])] or [llm.Chapter("Full Talk", "全文", 0, len(sections) - 1)]
-        return sections, chapters, data.get("summary", {})
+        return _load_clean(sections_path)
     log(f"[3/5] DeepSeek 清洗 / 分章 / 翻译（模型 {cfg['model']}，thinking={cfg['thinking']}"
         f"{'/' + cfg['reasoning_effort'] if cfg['thinking'] == 'enabled' else ''}，max_tokens={cfg['max_tokens']}）...")
     client = llm.DeepSeek(api_key, cfg, out_dir / "cache")
@@ -85,13 +101,21 @@ def _stage_clean(info, cues, out_dir: Path, run_dir: Path, prev_run: Path | None
     return sections, chapters, summary
 
 
-def _stage_capture(info, sections, run_dir: Path, prev_run: Path | None, cfg: dict, do: bool, log: Log) -> list[Path | None]:
-    if not do:
-        _copy_from_prev(prev_run, "img", run_dir)
-        return [p if p.exists() else None for p in (run_dir / "img" / f"{n:03d}.jpg" for n in range(1, len(sections) + 1))]
-    log("[4/5] 截图 ...")
-    stream = resolve.pick_variant(info, int(cfg["video_quality"]))
-    return capture.capture_frames(stream, [s.start_sec for s in sections], run_dir / "img", log)
+def _stage_outline(sections, cues, out_dir: Path, run_dir: Path, cfg: dict, api_key: str, log: Log) -> None:
+    """长小节拆带标题和起始时间的小段，结果写回本次 run 的 sections.json。"""
+    log("[4/5] DeepSeek 为长小节生成小段标题 ...")
+    llm.add_subsections(llm.DeepSeek(api_key, cfg, out_dir / "cache"), sections, cues, out_dir / "cache", log)
+    path = run_dir / "sections.json"
+    data = _load(path)
+    data["sections"] = [s.to_dict() for s in sections]
+    _dump(path, data)
+
+
+def _load_clean(sections_path: Path):
+    data = _load(sections_path)
+    sections = [llm.Section.from_dict(s) for s in data["sections"]]
+    chapters = [llm.Chapter(**c) for c in data.get("chapters", [])] or [llm.Chapter("Full Talk", "全文", 0, len(sections) - 1)]
+    return sections, chapters, data.get("summary", {})
 
 
 def _out_dir(vault_url: str, cfg: dict) -> Path:

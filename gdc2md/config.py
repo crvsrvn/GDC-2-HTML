@@ -21,18 +21,14 @@ DEFAULTS = {
     "max_tokens": 16000,         # 单次输出上限；思考模式下同时计入推理与正文
     "temperature": 1.0,
     "subtitle_lang": "eng",
-    "video_quality": 720,
+    "video_quality": 1080,       # HTML 内嵌视频的档位（取不高于此值的最高档）
     "chunk_seconds": 360,
-    "link_style": "http",        # 文档里时间戳链接的形式：http（本地服务，所有 Markdown 查看器都识别）/ file / relative
-    "http_base": "http://127.0.0.1:8765",  # link_style=http 时的前缀；控制台运行期间自动托管 out_dir，或用 `GDC2md.cmd serve` 常驻
-    "image_width": "50%",        # 小节截图在文档中的宽度（HTML width 属性）
 }
 
 # 取值受限的配置项
 CHOICES = {
     "thinking": ["disabled", "enabled"],
     "reasoning_effort": ["none", "low", "high", "max"],
-    "link_style": ["file", "relative", "http"],
 }
 
 
