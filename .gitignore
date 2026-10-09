@@ -1,5 +1,7 @@
 # 密钥（DPAPI 加密的 DeepSeek API Key）
 secrets.bin
+# GDC Vault 登录 Cookie（DPAPI 加密）
+cookie.bin
 
 # 生成产物
 output/

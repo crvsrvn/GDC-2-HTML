@@ -2,6 +2,7 @@
 
 - config.json  : 非敏感配置（输出目录、模型等）
 - secrets.bin  : DeepSeek API Key，使用 Windows DPAPI 加密（绑定当前 Windows 用户）
+- cookie.bin   : GDC Vault 登录 Cookie（会员视频用），同样 DPAPI 加密
 """
 import ctypes
 import json
@@ -11,6 +12,7 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = APP_DIR / "config.json"
 SECRET_PATH = APP_DIR / "secrets.bin"
+COOKIE_PATH = APP_DIR / "cookie.bin"
 
 DEFAULTS = {
     "out_dir": "output",         # 相对工具目录；工具目录整体移动后无需改配置
@@ -115,3 +117,18 @@ def mask_key(key: str) -> str:
     if len(key) <= 8:
         return "*" * len(key)
     return f"{key[:4]}{'*' * (len(key) - 8)}{key[-4:]}"
+
+
+def load_cookie() -> str | None:
+    if not COOKIE_PATH.exists():
+        return None
+    return _dpapi(COOKIE_PATH.read_bytes(), protect=False).decode("utf-8")
+
+
+def save_cookie(cookie: str) -> None:
+    COOKIE_PATH.write_bytes(_dpapi(cookie.strip().encode("utf-8"), protect=True))
+
+
+def delete_cookie() -> None:
+    if COOKIE_PATH.exists():
+        COOKIE_PATH.unlink()

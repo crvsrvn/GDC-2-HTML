@@ -1,12 +1,28 @@
 """带重试的 HTTP GET。"""
+import re
 import time
 
 import requests
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36"
+VAULT_DOMAIN = "gdcvault.com"
 
 _session = requests.Session()
 _session.headers["User-Agent"] = UA
+
+
+def parse_cookie(header: str) -> list[tuple[str, str]]:
+    """解析从浏览器复制的 Cookie 请求头："a=1; b=2"，允许带 "cookie:" 前缀。"""
+    header = re.sub(r"(?i)^\s*cookie:\s*", "", header)
+    pairs = (part.strip().partition("=") for part in header.split(";"))
+    return [(name, value) for name, sep, value in pairs if sep and name]
+
+
+def set_vault_cookie(header: str | None) -> None:
+    """登录 Cookie 只随 HTTPS 请求发往 gdcvault.com，CDN 等其他站点收不到。"""
+    _session.cookies.clear()
+    for name, value in parse_cookie(header or ""):
+        _session.cookies.set(name, value, domain=VAULT_DOMAIN, secure=True)
 
 
 def get_bytes(url: str, timeout: float = 20, retries: int = 3) -> bytes:

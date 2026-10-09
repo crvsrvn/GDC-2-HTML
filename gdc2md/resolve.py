@@ -54,11 +54,13 @@ def resolve(vault_url: str) -> VideoInfo:
     info = VideoInfo(vault_url=vault_url, play_id=m.group(1))
 
     page = get_text(vault_url)
+    if 'id="form_login_page"' in page:  # 未登录访问会员视频时被重定向到 /login
+        raise RuntimeError("该视频需要登录：请在主菜单 4 设置 GDC Vault Cookie；已设置过则可能已过期，请重新复制")
     _parse_metadata(page, info)
 
     m = re.search(r"blazestreaming\.com/\?id=([0-9a-f]{32})", page)
     if not m:
-        raise RuntimeError("页面中未找到播放器 iframe，可能是需要登录的会员内容")
+        raise RuntimeError("页面中未找到播放器 iframe，可能是当前账号无权观看或页面结构已变化")
     info.blaze_id = m.group(1)
     info.master_url = _lookup_playback_url(info.blaze_id)
     _parse_master(get_text(info.master_url), info.master_url, info)

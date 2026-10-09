@@ -9,9 +9,17 @@ import argparse
 import sys
 from getpass import getpass
 
-from gdc2md import config, pipeline
+from gdc2md import config, httpclient, pipeline
 from gdc2md.llm import DeepSeek
 
+COOKIE_HELP = """\
+复制 Cookie 的方法（Chrome，括号内为中文界面名称）：
+ 1. 在已登录的 Chrome 中打开要处理的视频页
+ 2. 按 F12 打开开发者工具，切到 Network（网络）面板，按 F5 刷新页面
+ 3. 点请求列表第一条（即视频页本身，可用 Doc（文档）筛选）
+ 4. 右侧 Headers（标头）→ Request Headers（请求标头）→ 右键 cookie 这一行 → Copy value（复制值）
+ 注意：不要用控制台的 document.cookie，它缺少登录会话 PHPSESSID
+粘贴：在下方 Cookie: 提示处单击右键粘贴（内容不回显），然后回车"""
 
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -33,9 +41,11 @@ def main() -> None:
 def menu(cfg: dict) -> None:
     actions = {"1": lambda: process(input("GDC Vault URL: ").strip(), cfg, "resolve"),
                "2": lambda: manage_key(cfg),
-               "3": lambda: settings(cfg)}
+               "3": lambda: settings(cfg),
+               "4": manage_cookie}
     while True:
-        print("\n==== GDC2md ====\n 1) 处理 GDC Vault 视频\n 2) 管理 DeepSeek API Key\n 3) 设置\n 0) 退出")
+        print("\n==== GDC2md ====\n 1) 处理 GDC Vault 视频\n 2) 管理 DeepSeek API Key\n 3) 设置\n"
+              " 4) 管理 GDC Vault Cookie（会员视频用）\n 0) 退出")
         choice = input("> ").strip()
         if choice == "0":
             return
@@ -52,6 +62,7 @@ def process(url: str, cfg: dict, start: str) -> None:
     if not url:
         return
     key = ensure_key(cfg)
+    httpclient.set_vault_cookie(config.load_cookie())
     pipeline.run(url, cfg, key, start)
 
 
@@ -90,6 +101,33 @@ def manage_key(cfg: dict) -> None:
     elif choice == "3" and key:
         ok, msg = DeepSeek(key, cfg).verify()
         print("有效" if ok else f"无效：{msg}")
+
+
+def manage_cookie() -> None:
+    cookie = config.load_cookie()
+    print(f"\n当前 Cookie：{'已设置' if cookie else '（未设置）'}")
+    print(" 1) 新增/修改\n 2) 删除\n 0) 返回")
+    choice = input("> ").strip()
+    if choice == "1":
+        input_cookie()
+    elif choice == "2" and cookie:
+        config.delete_cookie()
+        print("已删除")
+
+
+def input_cookie() -> None:
+    print(COOKIE_HELP)
+    cookie = getpass("Cookie: ").strip()
+    names = [name for name, _ in httpclient.parse_cookie(cookie)]
+    if not names:
+        print("未识别到 Cookie，未保存")
+        return
+    if "PHPSESSID" not in names:
+        print("缺少登录会话 PHPSESSID，可能复制错了，请按上面第 4 步从 Network 面板复制")
+        if input("仍然保存？(y/N) ").strip().lower() != "y":
+            return
+    config.save_cookie(cookie)
+    print(f"已加密保存到 cookie.bin（{len(names)} 项）")
 
 
 def settings(cfg: dict) -> None:
